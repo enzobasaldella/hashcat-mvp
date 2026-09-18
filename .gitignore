@@ -5,6 +5,7 @@ wordlists/optional/rockyou.txt.tmp
 
 # Cache e arquivos temporários do Hashcat
 hashcat/kernels/
+hashcat/hashcat.dictstat2
 hashcat/*.log
 hashcat/*.pid
 hashcat/*.potfile
