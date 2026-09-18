@@ -1,0 +1,14 @@
+# Gerados durante os testes
+audit_log.txt
+wordlists/optional/rockyou.txt
+wordlists/optional/rockyou.txt.tmp
+
+# Cache e arquivos temporários do Hashcat
+hashcat/kernels/
+hashcat/*.log
+hashcat/*.pid
+hashcat/*.potfile
+
+# Python
+__pycache__/
+*.pyc
