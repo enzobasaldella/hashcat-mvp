@@ -9,12 +9,6 @@ if [[ "$(uname -s)" != "Linux" || "$(uname -m)" != "x86_64" ]]; then
   exit 1
 fi
 
-if [[ ! -f wordlists/optional/rockyou.txt ]]; then
-  echo "Preparando RockYou na primeira execução..."
-  gzip -dc wordlists/optional/rockyou.txt.gz > wordlists/optional/rockyou.txt.tmp
-  mv wordlists/optional/rockyou.txt.tmp wordlists/optional/rockyou.txt
-fi
-
 if ! ./hashcat/hashcat.bin -I >/dev/null 2>&1; then
   echo "Hashcat não encontrou um dispositivo OpenCL."
   echo "No Ubuntu/Debian, instale o driver da GPU ou use: sudo apt install pocl-opencl-icd"

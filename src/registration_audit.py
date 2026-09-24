@@ -8,6 +8,7 @@ senhas em uma aplicação real.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import signal
@@ -28,9 +29,12 @@ if getattr(sys, "frozen", False):
     PROJECT_ROOT = MVP_ROOT
     HASHCAT = MVP_ROOT / "hashcat" / "hashcat.bin"
 else:
-    PROJECT_ROOT = Path(__file__).resolve().parent.parent
-    MVP_ROOT = PROJECT_ROOT / "hashcat-mvp"
-    HASHCAT = PROJECT_ROOT / "hashcat" / "programa" / "hashcat.bin"
+    # O mesmo código pode rodar na pasta de desenvolvimento ou no pacote.
+    source_directory = Path(__file__).resolve().parent
+    MVP_ROOT = source_directory if (source_directory / "wordlists").is_dir() else source_directory.parent
+    PROJECT_ROOT = MVP_ROOT.parent
+    bundled_hashcat = MVP_ROOT / "hashcat" / "hashcat.bin"
+    HASHCAT = bundled_hashcat if bundled_hashcat.exists() else PROJECT_ROOT / "hashcat" / "programa" / "hashcat.bin"
 WORDLISTS = MVP_ROOT / "wordlists"
 RULES = MVP_ROOT / "rules"
 MASKS = MVP_ROOT / "masks"
@@ -53,6 +57,11 @@ class Campaign:
     attack_mode: int
     operands: tuple[str, ...]
     extra_arguments: tuple[str, ...] = ()
+    direct_lookup: bool = False
+
+    @property
+    def label(self) -> str:
+        return f"{self.stage} - {self.detail}"
 
 
 @dataclass(frozen=True)
@@ -60,6 +69,10 @@ class AuditResult:
     recovered: bool
     elapsed_seconds: float
     campaign: str | None = None
+
+
+def format_seconds(value: float) -> str:
+    return "<0.1 s" if value < 0.05 else f"{value:.1f} s"
 
 
 def configure_terminal_input() -> None:
@@ -187,6 +200,15 @@ def write_candidates(path: Path, candidates: set[str]) -> str:
     return str(path)
 
 
+def association_paths(directory: Path) -> dict[str, str]:
+    return {
+        "direct": str(directory / "association-direct.txt"),
+        "patterns": str(directory / "association-patterns.txt"),
+        "rule_bases": str(directory / "association-rule-bases.txt"),
+        "combinator_bases": str(directory / "association-combinator-bases.txt"),
+    }
+
+
 def case_and_leet_variants(value: str) -> set[str]:
     """Cria variações de caixa e leet que não alteram o comprimento."""
     value = value.lower()
@@ -221,6 +243,7 @@ def case_and_leet_variants(value: str) -> set[str]:
 
 
 def build_association_files(registration: Registration, directory: Path) -> dict[str, str]:
+    paths = association_paths(directory)
     name_parts = registration.full_name.split()
     name_tokens = {normalize(part) for part in name_parts if normalize(part)}
     first_name = normalize(name_parts[0])
@@ -240,7 +263,8 @@ def build_association_files(registration: Registration, directory: Path) -> dict
         birth.strftime("%d%m"),
         birth.strftime("%d%m%y"),
     }
-    expanded = set(date_tokens)
+    direct = set(date_tokens)
+    patterns = set()
 
     # Bases diretas, truncadas e transformadas. A versão capitalizada é essencial
     # para encadear, por exemplo, "Enzo" com uma máscara numérica depois.
@@ -250,7 +274,7 @@ def build_association_files(registration: Registration, directory: Path) -> dict
         for base in bases:
             variants.update(case_and_leet_variants(base[:maximum]))
         variants_by_size[maximum] = variants
-        expanded.update(variants)
+        direct.update(variants)
 
     # Associa bases com informações do nascimento nos dois sentidos.
     for token in date_tokens:
@@ -258,8 +282,8 @@ def build_association_files(registration: Registration, directory: Path) -> dict
         if maximum < 1:
             continue
         for base in variants_by_size[maximum]:
-            expanded.add(base + token)
-            expanded.add(token + base)
+            direct.add(base + token)
+            direct.add(token + base)
 
     # Testa pares de campos, com e sem separadores, sempre limitados a oito.
     basic_bases = name_tokens | {institution, username, email_local}
@@ -270,7 +294,7 @@ def build_association_files(registration: Registration, directory: Path) -> dict
             for separator in ("", ".", "_", "-"):
                 joined = left + separator + right
                 if len(joined) <= 8:
-                    expanded.update(case_and_leet_variants(joined))
+                    direct.update(case_and_leet_variants(joined))
 
     # Encadeia caixa/leet com máscaras numéricas. Isso inclui combinações como
     # "Enzo" + "1592", que uma rule e uma mask isoladas não alcançariam juntas.
@@ -279,16 +303,17 @@ def build_association_files(registration: Registration, directory: Path) -> dict
         for number in range(10**digit_count):
             token = f"{number:0{digit_count}d}"
             for base in variants_by_size[maximum]:
-                expanded.add(base + token)
-                expanded.add(token + base)
+                patterns.add(base + token)
+                patterns.add(token + base)
 
     # Símbolos mais usuais também são combinados com as transformações anteriores.
     for symbol in "!@#$%&*_-.":
         for base in variants_by_size[7]:
-            expanded.add(base + symbol)
-            expanded.add(symbol + base)
+            patterns.add(base + symbol)
+            patterns.add(symbol + base)
 
-    expanded = {candidate for candidate in expanded if 1 <= len(candidate) <= 8}
+    direct = {candidate for candidate in direct if 1 <= len(candidate) <= 8}
+    patterns = {candidate for candidate in patterns if 1 <= len(candidate) <= 8 and candidate not in direct}
     rule_bases = {base[:8] for base in bases if base}
     rule_bases.update(date_tokens)
     combinator_bases = set()
@@ -296,16 +321,20 @@ def build_association_files(registration: Registration, directory: Path) -> dict
         combinator_bases.update(case_and_leet_variants(base[:4]))
 
     return {
-        "expanded": write_candidates(
-            directory / "association-expanded.txt",
-            expanded,
+        "direct": write_candidates(
+            Path(paths["direct"]),
+            direct,
+        ),
+        "patterns": write_candidates(
+            Path(paths["patterns"]),
+            patterns,
         ),
         "rule_bases": write_candidates(
-            directory / "association-rule-bases.txt",
+            Path(paths["rule_bases"]),
             rule_bases,
         ),
         "combinator_bases": write_candidates(
-            directory / "association-combinator-bases.txt",
+            Path(paths["combinator_bases"]),
             combinator_bases,
         ),
     }
@@ -385,94 +414,99 @@ def execute_campaign(
         raise
 
 
+def lookup_wordlist(wordlist: Path, password_hash: str, deadline: float) -> str | None:
+    """Compara MD5 de uma lista curta sem iniciar outro processo."""
+    with wordlist.open("rb") as candidates:
+        for index, line in enumerate(candidates):
+            if index % 4096 == 0 and time.monotonic() >= deadline:
+                return None
+            candidate = line.rstrip(b"\r\n")
+            if candidate and hashlib.md5(candidate, usedforsecurity=False).hexdigest() == password_hash:
+                return candidate.decode("utf-8", errors="replace")
+    return None
+
+
 def add_straight(
     campaigns: list[Campaign],
     stage: str,
     detail: str,
     wordlist: str | Path,
     rule: str | Path | None = None,
+    direct_lookup: bool = False,
 ) -> None:
     extra = ("-r", str(rule)) if rule else ()
-    campaigns.append(Campaign(stage, detail, 0, (str(wordlist),), extra))
+    campaigns.append(Campaign(stage, detail, 0, (str(wordlist),), extra, direct_lookup))
 
 
 def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     campaigns: list[Campaign] = []
 
-    # Uma lista já encadeada evita várias inicializações do Hashcat e combina
-    # associação, caixa, leet, datas, símbolos e máscaras numéricas.
-    add_straight(
-        campaigns,
-        "Associação expandida",
-        "dados pessoais + transformações + números",
-        association["expanded"],
-    )
-
-    # Como a base pessoal é pequena, podemos aplicar muitas rules sobre ela antes
-    # de gastar tempo com as mesmas regras no dicionário brasileiro completo.
+    # Candidatos frequentes primeiro; cada acervo é identificado no terminal.
+    add_straight(campaigns, "Consulta direta", "Top 100 mil (até 8)", WORDLISTS / "optional/top100000-8.txt", direct_lookup=True)
+    add_straight(campaigns, "Consulta direta", "BR completo", WORDLISTS / "br-full-8.txt", direct_lookup=True)
+    add_straight(campaigns, "Associação", "cadastro + datas + variações", association["direct"])
+    # Padrões do cadastro têm bom custo/benefício antes da lista grande.
+    add_straight(campaigns, "Associação + padrões", "números e símbolos", association["patterns"])
+    add_straight(campaigns, "Consulta direta", "RockYou (até 8)", WORDLISTS / "optional/rockyou-8.txt")
     for filename in ("top10_2025.rule", "best66.rule", "leetspeak.rule", "ptbr.rule"):
         add_straight(
             campaigns,
-            "Rules essenciais — associação",
+            "Associação + rules",
             filename,
             association["rule_bases"],
             RULES / "essential" / filename,
         )
-    for filename in ("rockyou-30000.rule", "d3ad0ne.rule", "dive.rule"):
-        add_straight(
-            campaigns,
-            "Rules pesadas — associação",
-            filename,
-            association["rule_bases"],
-            RULES / "heavy" / filename,
-        )
 
-    # Combina dados pessoais curtos com palavras brasileiras curtas nos dois sentidos.
+    # Duas ordens de combinação entre bases pessoais e palavras brasileiras curtas.
     short_brazilian_words = WORDLISTS / "by-length/max-4.txt"
     campaigns.append(
         Campaign(
-            "Associação + dicionário",
-            "dado pessoal seguido de palavra brasileira",
+            "Associação + BR curto",
+            "perfil + palavra",
             1,
             (association["combinator_bases"], str(short_brazilian_words)),
         )
     )
     campaigns.append(
         Campaign(
-            "Associação + dicionário",
-            "palavra brasileira seguida de dado pessoal",
+            "Associação + BR curto",
+            "palavra + perfil",
             1,
             (str(short_brazilian_words), association["combinator_bases"]),
         )
     )
 
-    # Wordlist brasileira e regras que respeitam o limite de oito caracteres.
-    add_straight(campaigns, "Dicionário brasileiro", "lista direta", WORDLISTS / "br-full-8.txt")
-    add_straight(campaigns, "Dicionário brasileiro", "caixa e leet", WORDLISTS / "br-ascii-8.txt", RULES / "max8/01-same-length.rule")
-    add_straight(campaigns, "Dicionário brasileiro", "sufixo de um caractere", WORDLISTS / "by-length/max-7.txt", RULES / "max8/02-append-1.rule")
-    add_straight(campaigns, "Dicionário brasileiro", "prefixo de um caractere", WORDLISTS / "by-length/max-7.txt", RULES / "max8/03-prepend-1.rule")
-    add_straight(campaigns, "Dicionário brasileiro", "associações comuns", WORDLISTS / "by-length/max-7.txt", RULES / "max8/07-association-append.rule")
-    add_straight(campaigns, "Dicionário brasileiro", "sufixo de dois dígitos", WORDLISTS / "by-length/max-6.txt", RULES / "max8/04-append-2.rule")
-    add_straight(campaigns, "Dicionário brasileiro", "prefixo de dois dígitos", WORDLISTS / "by-length/max-6.txt", RULES / "max8/05-prepend-2.rule")
-    add_straight(campaigns, "Dicionário brasileiro", "anos", WORDLISTS / "by-length/max-4.txt", RULES / "max8/06-years-4.rule")
+    # As três sublistas são usadas: deixam espaço para os caracteres adicionados.
+    add_straight(campaigns, "Consulta + rules - BR", "caixa e leet", WORDLISTS / "br-ascii-8.txt", RULES / "max8/01-same-length.rule")
+    add_straight(campaigns, "Consulta + rules - BR", "sufixo de 1", WORDLISTS / "by-length/max-7.txt", RULES / "max8/02-append-1.rule")
+    add_straight(campaigns, "Consulta + rules - BR", "prefixo de 1", WORDLISTS / "by-length/max-7.txt", RULES / "max8/03-prepend-1.rule")
+    add_straight(campaigns, "Consulta + rules - BR", "associações comuns", WORDLISTS / "by-length/max-7.txt", RULES / "max8/07-association-append.rule")
+    add_straight(campaigns, "Consulta + rules - BR", "sufixo de 2", WORDLISTS / "by-length/max-6.txt", RULES / "max8/04-append-2.rule")
+    add_straight(campaigns, "Consulta + rules - BR", "prefixo de 2", WORDLISTS / "by-length/max-6.txt", RULES / "max8/05-prepend-2.rule")
+    add_straight(campaigns, "Consulta + rules - BR", "anos", WORDLISTS / "by-length/max-4.txt", RULES / "max8/06-years-4.rule")
 
-    # Listas opcionais existentes no projeto.
-    for filename in ("top100000.txt", "rockyou.txt"):
-        path = WORDLISTS / "optional" / filename
-        if path.exists():
-            add_straight(campaigns, "Listas opcionais", filename, path)
-
-    campaigns.append(Campaign("Máscaras numéricas", "quatro a oito dígitos", 3, (str(MASKS / "01-numeric.hcmask"),)))
-
-    # Formatos frequentes com custo compatível com o teste local.
+    # Máscaras simples e numéricas antes das regras sobre listas grandes.
     for mask in ("?l?l?l?l", "?l?l?l?l?l", "?l?l?l?l?d?d", "?u?l?l?l?d?d"):
-        campaigns.append(Campaign("Máscaras comuns", mask, 3, (mask,)))
+        campaigns.append(Campaign("Máscaras", mask, 3, (mask,)))
+    campaigns.append(Campaign("Máscaras", "numéricas (4 a 8)", 3, (str(MASKS / "01-numeric.hcmask"),)))
 
-    # Regras consolidadas. Se consumirem o restante do prazo, o processo é interrompido.
+    # No RockYou, só a regra curta é testada antes das regras pesadas.
+    add_straight(campaigns, "Consulta + rules - RockYou", "top10_2025.rule", WORDLISTS / "optional/rockyou-8.txt", RULES / "essential/top10_2025.rule")
+
+    for filename in ("rockyou-30000.rule", "d3ad0ne.rule", "dive.rule"):
+        add_straight(
+            campaigns,
+            "Associação + rules pesadas",
+            filename,
+            association["rule_bases"],
+            RULES / "heavy" / filename,
+        )
+
+    # Regras consolidadas sobre a lista brasileira maior ficam no fim.
     for filename in ("top10_2025.rule", "best66.rule", "leetspeak.rule", "ptbr.rule"):
         add_straight(
             campaigns,
-            "Rules essenciais — BR ASCII",
+            "Consulta + rules - BR ASCII",
             filename,
             WORDLISTS / "br-ascii-8.txt",
             RULES / "essential" / filename,
@@ -480,21 +514,23 @@ def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     for filename in ("rockyou-30000.rule", "d3ad0ne.rule", "dive.rule"):
         add_straight(
             campaigns,
-            "Rules pesadas — BR ASCII",
+            "Consulta + rules pesadas - BR ASCII",
             filename,
             WORDLISTS / "br-ascii-8.txt",
             RULES / "heavy" / filename,
         )
 
     # Última etapa: máscaras amplas usam somente o tempo que ainda estiver disponível.
-    campaigns.append(Campaign("Máscaras ampliadas", "formatos comuns completos", 3, (str(MASKS / "02-common-shapes.hcmask"),)))
-    campaigns.append(Campaign("Máscaras ampliadas", "alfabéticas pesadas", 3, (str(MASKS / "05-heavy-alpha.hcmask"),)))
+    campaigns.append(Campaign("Máscaras amplas", "formatos comuns completos", 3, (str(MASKS / "02-common-shapes.hcmask"),)))
+    campaigns.append(Campaign("Máscaras amplas", "alfabéticas pesadas", 3, (str(MASKS / "05-heavy-alpha.hcmask"),)))
     return campaigns
 
 
 def validate_environment() -> None:
     required = (
         HASHCAT,
+        WORDLISTS / "optional/top100000-8.txt",
+        WORDLISTS / "optional/rockyou-8.txt",
         WORDLISTS / "br-full-8.txt",
         WORDLISTS / "br-ascii-8.txt",
         WORDLISTS / "by-length/max-4.txt",
@@ -557,11 +593,11 @@ def append_attempt_log(
 ) -> None:
     """Registra uma tentativa mantendo o formato simples solicitado."""
     if result.recovered:
-        status = f"Quebrada em {result.elapsed_seconds:.1f} s"
+        status = f"Quebrada em {format_seconds(result.elapsed_seconds)}"
         if result.campaign:
             status += f" [{result.campaign}]"
     else:
-        status = f"Não quebrada em {result.elapsed_seconds:.1f} s"
+        status = f"Não quebrada em {format_seconds(result.elapsed_seconds)}"
 
     with AUDIT_LOG.open("a", encoding="utf-8") as log_file:
         log_file.write(f"Senha {attempt_number}: {password} - {status}\n")
@@ -573,6 +609,8 @@ def run_single_audit(
     campaigns: list[Campaign],
     session_directory: Path,
     attempt_number: int,
+    registration: Registration,
+    association: dict[str, str],
 ) -> AuditResult:
     """Audita uma senha; apenas o MD5 é entregue aos processos do Hashcat."""
     started = time.monotonic()
@@ -591,41 +629,56 @@ def run_single_audit(
         potfile = attempt_directory / "result.potfile"
         hash_file.write_text(password_hash + "\n", encoding="ascii")
 
-        current_stage = None
         errors = 0
         print(f"\nAuditoria iniciada: {duration_seconds} s")
 
-        for campaign in campaigns:
+        for index, campaign in enumerate(campaigns, start=1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            if campaign.stage != current_stage:
-                current_stage = campaign.stage
-                print(f"  {current_stage} | {int(remaining)} s restantes")
+            print(
+                f"  [{index:02d}/{len(campaigns):02d}] {campaign.label} | {math.ceil(remaining)} s restantes",
+                flush=True,
+            )
 
-            return_code = execute_campaign(campaign, hash_file, potfile, deadline)
-            recovered = recovered_password(potfile, password_hash)
+            campaign_started = time.monotonic()
+            if campaign.stage == "Associação" and not Path(association["direct"]).exists():
+                print("           preparando associações do cadastro...", flush=True)
+                build_association_files(registration, session_directory)
+            if campaign.direct_lookup:
+                recovered = lookup_wordlist(Path(campaign.operands[0]), password_hash, deadline)
+                return_code = 0 if recovered is not None else 1
+            else:
+                return_code = execute_campaign(campaign, hash_file, potfile, deadline)
+                recovered = recovered_password(potfile, password_hash)
+            campaign_elapsed = time.monotonic() - campaign_started
             if recovered is not None:
                 elapsed = time.monotonic() - started
+                print(f"           encontrada em {format_seconds(campaign_elapsed)}")
                 print("\nResultado")
                 print(f"  Senha: {recovered}")
                 print("  Status: encontrada")
-                print(f"  Tempo: {elapsed:.1f} s")
-                print(f"  Campanha: {campaign.stage} — {campaign.detail}")
+                print(f"  Tempo: {format_seconds(elapsed)}")
+                print(f"  Campanha: {campaign.label}")
                 return AuditResult(
                     recovered=True,
                     elapsed_seconds=elapsed,
-                    campaign=f"{campaign.stage} — {campaign.detail}",
+                    campaign=campaign.label,
                 )
 
             if return_code not in {0, 1, 2, 3, 4}:
                 errors += 1
+                print(f"           erro operacional ({return_code}) após {format_seconds(campaign_elapsed)}")
+            elif deadline - time.monotonic() <= 0:
+                print(f"           tempo esgotado após {format_seconds(campaign_elapsed)}")
+            else:
+                print(f"           sem resultado em {format_seconds(campaign_elapsed)}")
 
         elapsed = min(time.monotonic() - started, duration_seconds)
         print("\nResultado")
         print(f"  Senha: {password}")
         print("  Status: não encontrada")
-        print(f"  Tempo: {elapsed:.1f} s")
+        print(f"  Tempo: {format_seconds(elapsed)}")
         if errors:
             print(f"  Erros operacionais: {errors}")
         return AuditResult(recovered=False, elapsed_seconds=elapsed)
@@ -654,8 +707,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="gt-tecseg-audit-") as temporary_name:
         temporary = Path(temporary_name)
-        print("Preparando campanhas...")
-        association = build_association_files(registration, temporary)
+        association = association_paths(temporary)
         campaigns = build_campaigns(association)
         attempt_number = 1
 
@@ -669,6 +721,8 @@ def main() -> int:
                 campaigns,
                 temporary,
                 attempt_number,
+                registration,
+                association,
             )
             append_attempt_log(attempt_number, password, result)
 
