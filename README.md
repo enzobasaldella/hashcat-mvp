@@ -11,7 +11,7 @@ chmod +x run.sh
 ./run.sh
 ```
 
-O pacote já inclui o recorte do RockYou com candidatos de até 8 bytes, pronto para uso. Python e uma instalação separada do Hashcat não são necessários. A primeira compilação do kernel OpenCL pode levar cerca de um minuto.
+O pacote já inclui o recorte do RockYou com candidatos UTF-8 de até 8 caracteres, pronto para uso. Python e uma instalação separada do Hashcat não são necessários. A primeira compilação do kernel OpenCL pode levar cerca de um minuto.
 
 Se nenhum dispositivo aparecer, no Ubuntu/Debian é possível habilitar o processador com:
 
