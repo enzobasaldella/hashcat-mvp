@@ -39,6 +39,7 @@ WORDLISTS = MVP_ROOT / "wordlists"
 RULES = MVP_ROOT / "rules"
 MASKS = MVP_ROOT / "masks"
 AUDIT_LOG = MVP_ROOT / "audit_log.txt"
+COMMON_SYMBOLS = "!@#._-"
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,10 @@ def association_paths(directory: Path) -> dict[str, str]:
         "patterns": str(directory / "association-patterns.txt"),
         "rule_bases": str(directory / "association-rule-bases.txt"),
         "combinator_bases": str(directory / "association-combinator-bases.txt"),
+        "hybrid_3": str(directory / "hybrid-bases-max-3.txt"),
+        "hybrid_4": str(directory / "hybrid-bases-max-4.txt"),
+        "hybrid_5": str(directory / "hybrid-bases-max-5.txt"),
+        "year_symbol_rules": str(directory / "year-symbol.rule"),
     }
 
 
@@ -329,6 +334,25 @@ def build_association_files(registration: Registration, directory: Path) -> dict
     for base in bases:
         combinator_bases.update(case_and_leet_variants(base[:4]))
 
+    # Uma base curta permite combinar números e símbolo sem ultrapassar 8.
+    short_brazilian_words = set((WORDLISTS / "by-length/max-6.txt").read_text(encoding="ascii").splitlines())
+    hybrid_bases = {}
+    for maximum in (3, 4, 5):
+        candidates = {word for word in short_brazilian_words if 1 <= len(word) <= maximum}
+        candidates.update(base for base in variants_by_size[maximum] if 1 <= len(base) <= maximum)
+        hybrid_bases[maximum] = write_candidates(Path(paths[f"hybrid_{maximum}"]), candidates)
+
+    # Rules compostas: a saída de uma campanha não alimenta outra campanha.
+    # Portanto, ano e símbolo precisam aparecer juntos na mesma regra.
+    years = set(range(datetime.now().year - 3, datetime.now().year + 2)) | {birth.year}
+    year_symbol_rules = []
+    for year in sorted(years):
+        append_year = "".join(f"${digit}" for digit in f"{year:04d}")
+        for symbol in COMMON_SYMBOLS:
+            append_symbol = f"${symbol}"
+            year_symbol_rules.extend((append_year + append_symbol, append_symbol + append_year))
+    Path(paths["year_symbol_rules"]).write_text("\n".join(year_symbol_rules) + "\n", encoding="ascii")
+
     return {
         "direct": write_candidates(
             Path(paths["direct"]),
@@ -346,6 +370,10 @@ def build_association_files(registration: Registration, directory: Path) -> dict
             Path(paths["combinator_bases"]),
             combinator_bases,
         ),
+        "hybrid_3": hybrid_bases[3],
+        "hybrid_4": hybrid_bases[4],
+        "hybrid_5": hybrid_bases[5],
+        "year_symbol_rules": paths["year_symbol_rules"],
     }
 
 
@@ -478,6 +506,13 @@ def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     # A lista numérica é barata em GPU e não precisa virar um TXT gigantesco.
     campaigns.append(Campaign("Máscaras", "numéricas (1 a 8)", 3, (str(MASKS / "01-numeric.hcmask"),)))
     add_straight(campaigns, "Associação", "cadastro + datas + variações", association["direct"])
+    add_straight(
+        campaigns,
+        "Associação + ano/símbolo",
+        "base curta + ano plausível + símbolo",
+        association["hybrid_3"],
+        association["year_symbol_rules"],
+    )
     # Padrões do cadastro têm bom custo/benefício antes da lista grande.
     add_straight(campaigns, "Associação + padrões", "números e símbolos", association["patterns"])
     add_straight(campaigns, "Consulta direta", "RockYou (até 8)", WORDLISTS / "optional/rockyou-8.txt")
@@ -517,6 +552,21 @@ def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     add_straight(campaigns, "Consulta + rules - BR", "sufixo de 2", WORDLISTS / "by-length/max-6.txt", RULES / "max8/04-append-2.rule")
     add_straight(campaigns, "Consulta + rules - BR", "prefixo de 2", WORDLISTS / "by-length/max-6.txt", RULES / "max8/05-prepend-2.rule")
     add_straight(campaigns, "Consulta + rules - BR", "anos", WORDLISTS / "by-length/max-4.txt", RULES / "max8/06-years-4.rule")
+
+    # Seis formatos gerais: base até 3/4/5 + números + símbolo, nas duas ordens.
+    for maximum, digit_count in ((3, 4), (4, 3), (5, 2)):
+        base_file = association[f"hybrid_{maximum}"]
+        digits = "?d" * digit_count
+        for mask, order in ((digits + "?1", "números + símbolo"), ("?1" + digits, "símbolo + números")):
+            campaigns.append(
+                Campaign(
+                    "Híbrido base curta",
+                    f"base até {maximum} + {order}",
+                    6,
+                    (base_file, mask),
+                    ("-1", COMMON_SYMBOLS),
+                )
+            )
 
     # Híbridos cobrem palavras brasileiras curtas com números ou símbolos.
     # As sublistas garantem que o candidato final não ultrapasse 8 caracteres.
