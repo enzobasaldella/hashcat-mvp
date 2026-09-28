@@ -69,6 +69,15 @@ class AuditResult:
     recovered: bool
     elapsed_seconds: float
     campaign: str | None = None
+    completed: bool = True
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class CampaignExecution:
+    return_code: int | None
+    timed_out: bool = False
+    diagnostic: str = ""
 
 
 def format_seconds(value: float) -> str:
@@ -374,10 +383,10 @@ def execute_campaign(
     hash_file: Path,
     potfile: Path,
     deadline: float,
-) -> int:
+) -> CampaignExecution:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        return 2
+        return CampaignExecution(None, timed_out=True)
 
     command = [
         str(HASHCAT),
@@ -391,39 +400,50 @@ def execute_campaign(
         *campaign.extra_arguments,
         "--potfile-path",
         str(potfile),
-        "--runtime",
-        str(max(1, int(remaining))),
         "--restore-disable",
         "--logfile-disable",
         "--quiet",
     ]
 
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    try:
-        return process.wait(timeout=max(0.1, remaining))
-    except subprocess.TimeoutExpired:
-        stop_process(process)
-        return 2
-    except KeyboardInterrupt:
-        stop_process(process)
-        raise
+    # Guarde o diagnóstico: um arquivo ausente do Hashcat não pode parecer
+    # simplesmente uma senha que não foi encontrada.
+    with tempfile.TemporaryFile() as diagnostics:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=diagnostics,
+                stderr=diagnostics,
+                start_new_session=True,
+            )
+        except OSError as error:
+            return CampaignExecution(None, diagnostic=str(error))
+
+        try:
+            return_code = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            stop_process(process)
+            return CampaignExecution(process.returncode, timed_out=True)
+        except KeyboardInterrupt:
+            stop_process(process)
+            raise
+
+        if return_code not in {0, 1}:
+            diagnostics.seek(0)
+            message = diagnostics.read(2048).decode("utf-8", errors="replace").strip()
+            return CampaignExecution(return_code, diagnostic=message or "Hashcat encerrou sem diagnóstico.")
+        return CampaignExecution(return_code)
 
 
-def lookup_wordlist(wordlist: Path, password_hash: str, deadline: float) -> str | None:
+def lookup_wordlist(wordlist: Path, password_hash: str, deadline: float) -> tuple[str | None, bool]:
     """Compara MD5 de uma lista curta sem iniciar outro processo."""
     with wordlist.open("rb") as candidates:
         for index, line in enumerate(candidates):
             if index % 4096 == 0 and time.monotonic() >= deadline:
-                return None
+                return None, False
             candidate = line.rstrip(b"\r\n")
             if candidate and hashlib.md5(candidate, usedforsecurity=False).hexdigest() == password_hash:
-                return candidate.decode("utf-8", errors="replace")
-    return None
+                return candidate.decode("utf-8", errors="replace"), True
+    return None, True
 
 
 def add_straight(
@@ -438,12 +458,25 @@ def add_straight(
     campaigns.append(Campaign(stage, detail, 0, (str(wordlist),), extra, direct_lookup))
 
 
+def add_hybrid_pair(
+    campaigns: list[Campaign],
+    wordlist: Path,
+    mask: str,
+    description: str,
+) -> None:
+    """Testa palavra+formato e formato+palavra com -a 6 e -a 7."""
+    campaigns.append(Campaign("Híbrido BR", f"{description} no final", 6, (str(wordlist), mask)))
+    campaigns.append(Campaign("Híbrido BR", f"{description} no início", 7, (mask, str(wordlist))))
+
+
 def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     campaigns: list[Campaign] = []
 
     # Candidatos frequentes primeiro; cada acervo é identificado no terminal.
     add_straight(campaigns, "Consulta direta", "Top 100 mil (até 8)", WORDLISTS / "optional/top100000-8.txt", direct_lookup=True)
     add_straight(campaigns, "Consulta direta", "BR completo", WORDLISTS / "br-full-8.txt", direct_lookup=True)
+    # A lista numérica é barata em GPU e não precisa virar um TXT gigantesco.
+    campaigns.append(Campaign("Máscaras", "numéricas (1 a 8)", 3, (str(MASKS / "01-numeric.hcmask"),)))
     add_straight(campaigns, "Associação", "cadastro + datas + variações", association["direct"])
     # Padrões do cadastro têm bom custo/benefício antes da lista grande.
     add_straight(campaigns, "Associação + padrões", "números e símbolos", association["patterns"])
@@ -485,10 +518,16 @@ def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     add_straight(campaigns, "Consulta + rules - BR", "prefixo de 2", WORDLISTS / "by-length/max-6.txt", RULES / "max8/05-prepend-2.rule")
     add_straight(campaigns, "Consulta + rules - BR", "anos", WORDLISTS / "by-length/max-4.txt", RULES / "max8/06-years-4.rule")
 
-    # Máscaras simples e numéricas antes das regras sobre listas grandes.
+    # Híbridos cobrem palavras brasileiras curtas com números ou símbolos.
+    # As sublistas garantem que o candidato final não ultrapasse 8 caracteres.
+    add_hybrid_pair(campaigns, WORDLISTS / "by-length/max-7.txt", "?d", "1 dígito")
+    add_hybrid_pair(campaigns, WORDLISTS / "by-length/max-6.txt", "?d?d", "2 dígitos")
+    add_hybrid_pair(campaigns, WORDLISTS / "by-length/max-4.txt", "?d?d?d?d", "4 dígitos")
+    add_hybrid_pair(campaigns, WORDLISTS / "by-length/max-7.txt", "?s", "1 símbolo")
+
+    # Máscaras estruturadas antes das regras sobre listas grandes.
     for mask in ("?l?l?l?l", "?l?l?l?l?l", "?l?l?l?l?d?d", "?u?l?l?l?d?d"):
         campaigns.append(Campaign("Máscaras", mask, 3, (mask,)))
-    campaigns.append(Campaign("Máscaras", "numéricas (4 a 8)", 3, (str(MASKS / "01-numeric.hcmask"),)))
 
     # No RockYou, só a regra curta é testada antes das regras pesadas.
     add_straight(campaigns, "Consulta + rules - RockYou", "top10_2025.rule", WORDLISTS / "optional/rockyou-8.txt", RULES / "essential/top10_2025.rule")
@@ -529,6 +568,9 @@ def build_campaigns(association: dict[str, str]) -> list[Campaign]:
 def validate_environment() -> None:
     required = (
         HASHCAT,
+        HASHCAT.parent / "hashcat.hcstat2",
+        HASHCAT.parent / "OpenCL/markov_le.cl",
+        HASHCAT.parent / "OpenCL/markov_be.cl",
         WORDLISTS / "optional/top100000-8.txt",
         WORDLISTS / "optional/rockyou-8.txt",
         WORDLISTS / "br-full-8.txt",
@@ -596,8 +638,12 @@ def append_attempt_log(
         status = f"Quebrada em {format_seconds(result.elapsed_seconds)}"
         if result.campaign:
             status += f" [{result.campaign}]"
+    elif result.error:
+        status = f"Erro operacional em {format_seconds(result.elapsed_seconds)} [{result.campaign}]"
+    elif not result.completed:
+        status = f"Tempo esgotado em {format_seconds(result.elapsed_seconds)} (teste parcial)"
     else:
-        status = f"Não quebrada em {format_seconds(result.elapsed_seconds)}"
+        status = f"Não quebrada após todas as campanhas em {format_seconds(result.elapsed_seconds)}"
 
     with AUDIT_LOG.open("a", encoding="utf-8") as log_file:
         log_file.write(f"Senha {attempt_number}: {password} - {status}\n")
@@ -629,8 +675,8 @@ def run_single_audit(
         potfile = attempt_directory / "result.potfile"
         hash_file.write_text(password_hash + "\n", encoding="ascii")
 
-        errors = 0
         print(f"\nAuditoria iniciada: {duration_seconds} s")
+        completed = False
 
         for index, campaign in enumerate(campaigns, start=1):
             remaining = deadline - time.monotonic()
@@ -646,10 +692,10 @@ def run_single_audit(
                 print("           preparando associações do cadastro...", flush=True)
                 build_association_files(registration, session_directory)
             if campaign.direct_lookup:
-                recovered = lookup_wordlist(Path(campaign.operands[0]), password_hash, deadline)
-                return_code = 0 if recovered is not None else 1
+                recovered, lookup_completed = lookup_wordlist(Path(campaign.operands[0]), password_hash, deadline)
+                execution = CampaignExecution(0 if recovered is not None else 1, timed_out=not lookup_completed)
             else:
-                return_code = execute_campaign(campaign, hash_file, potfile, deadline)
+                execution = execute_campaign(campaign, hash_file, potfile, deadline)
                 recovered = recovered_password(potfile, password_hash)
             campaign_elapsed = time.monotonic() - campaign_started
             if recovered is not None:
@@ -666,22 +712,26 @@ def run_single_audit(
                     campaign=campaign.label,
                 )
 
-            if return_code not in {0, 1, 2, 3, 4}:
-                errors += 1
-                print(f"           erro operacional ({return_code}) após {format_seconds(campaign_elapsed)}")
-            elif deadline - time.monotonic() <= 0:
-                print(f"           tempo esgotado após {format_seconds(campaign_elapsed)}")
-            else:
-                print(f"           sem resultado em {format_seconds(campaign_elapsed)}")
+            if execution.diagnostic or (not execution.timed_out and execution.return_code != 1):
+                diagnostic = execution.diagnostic or f"Código de saída inesperado: {execution.return_code}"
+                print(f"           ERRO após {format_seconds(campaign_elapsed)}: {diagnostic}")
+                print("\nResultado")
+                print("  Status: auditoria interrompida por erro operacional")
+                print(f"  Campanha: {campaign.label}")
+                return AuditResult(False, time.monotonic() - started, campaign.label, completed=False, error=diagnostic)
+            if execution.timed_out:
+                print(f"           prazo atingido após {format_seconds(campaign_elapsed)}")
+                break
+            print(f"           concluída sem encontrar em {format_seconds(campaign_elapsed)}")
+        else:
+            completed = True
 
         elapsed = min(time.monotonic() - started, duration_seconds)
         print("\nResultado")
         print(f"  Senha: {password}")
-        print("  Status: não encontrada")
+        print("  Status: não encontrada após todas as campanhas" if completed else "  Status: tempo esgotado; teste parcial")
         print(f"  Tempo: {format_seconds(elapsed)}")
-        if errors:
-            print(f"  Erros operacionais: {errors}")
-        return AuditResult(recovered=False, elapsed_seconds=elapsed)
+        return AuditResult(recovered=False, elapsed_seconds=elapsed, completed=completed)
 
 
 def main() -> int:

@@ -15,4 +15,10 @@ if ! ./hashcat/hashcat.bin -I >/dev/null 2>&1; then
   exit 1
 fi
 
+# O código-fonte evita a dependência da glibc usada para empacotar o binário.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 10))'; then
+  exec python3 src/registration_audit.py
+fi
+
+echo "Python 3.10+ não encontrado; tentando o executável portátil."
 exec ./registration-audit
