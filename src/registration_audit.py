@@ -410,10 +410,10 @@ def execute_campaign(
     campaign: Campaign,
     hash_file: Path,
     potfile: Path,
-    deadline: float,
+    deadline: float | None,
 ) -> CampaignExecution:
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0:
         return CampaignExecution(None, timed_out=True)
 
     command = [
@@ -462,11 +462,11 @@ def execute_campaign(
         return CampaignExecution(return_code)
 
 
-def lookup_wordlist(wordlist: Path, password_hash: str, deadline: float) -> tuple[str | None, bool]:
+def lookup_wordlist(wordlist: Path, password_hash: str, deadline: float | None) -> tuple[str | None, bool]:
     """Compara MD5 de uma lista curta sem iniciar outro processo."""
     with wordlist.open("rb") as candidates:
         for index, line in enumerate(candidates):
-            if index % 4096 == 0 and time.monotonic() >= deadline:
+            if deadline is not None and index % 4096 == 0 and time.monotonic() >= deadline:
                 return None, False
             candidate = line.rstrip(b"\r\n")
             if candidate and hashlib.md5(candidate, usedforsecurity=False).hexdigest() == password_hash:
@@ -699,22 +699,30 @@ def append_attempt_log(
         log_file.write(f"Senha {attempt_number}: {password} - {status}\n")
 
 
-def run_single_audit(
-    password: str,
-    duration_seconds: int,
+def run_hash_audit(
+    password_hash: str,
+    duration_seconds: int | None,
     campaigns: list[Campaign],
     session_directory: Path,
     attempt_number: int,
     registration: Registration,
     association: dict[str, str],
+    *,
+    progress: bool = False,
 ) -> AuditResult:
-    """Audita uma senha; apenas o MD5 é entregue aos processos do Hashcat."""
+    """Executa as campanhas usando somente o MD5; não registra a senha recuperada."""
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", password_hash):
+        raise ValueError("Hash MD5 inválido para o laboratório.")
+    if duration_seconds is not None and duration_seconds < 1:
+        raise ValueError("O prazo precisa ser positivo.")
+    password_hash = password_hash.lower()
+
+    def announce(message: str) -> None:
+        if progress:
+            print(message, flush=True)
+
     started = time.monotonic()
-    deadline = started + duration_seconds
-    password_hash = hashlib.md5(
-        password.encode("utf-8"),
-        usedforsecurity=False,
-    ).hexdigest()
+    deadline = started + duration_seconds if duration_seconds is not None else None
 
     with tempfile.TemporaryDirectory(
         prefix=f"attempt-{attempt_number:02d}-",
@@ -725,21 +733,19 @@ def run_single_audit(
         potfile = attempt_directory / "result.potfile"
         hash_file.write_text(password_hash + "\n", encoding="ascii")
 
-        print(f"\nAuditoria iniciada: {duration_seconds} s")
+        announce(f"\nAuditoria iniciada: {duration_seconds} s" if duration_seconds is not None else "\nAuditoria iniciada: todas as campanhas")
         completed = False
 
         for index, campaign in enumerate(campaigns, start=1):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
                 break
-            print(
-                f"  [{index:02d}/{len(campaigns):02d}] {campaign.label} | {math.ceil(remaining)} s restantes",
-                flush=True,
-            )
+            suffix = f" | {math.ceil(remaining)} s restantes" if remaining is not None else ""
+            announce(f"  [{index:02d}/{len(campaigns):02d}] {campaign.label}{suffix}")
 
             campaign_started = time.monotonic()
             if campaign.stage == "Associação" and not Path(association["direct"]).exists():
-                print("           preparando associações do cadastro...", flush=True)
+                announce("           preparando associações do cadastro...")
                 build_association_files(registration, session_directory)
             if campaign.direct_lookup:
                 recovered, lookup_completed = lookup_wordlist(Path(campaign.operands[0]), password_hash, deadline)
@@ -750,12 +756,7 @@ def run_single_audit(
             campaign_elapsed = time.monotonic() - campaign_started
             if recovered is not None:
                 elapsed = time.monotonic() - started
-                print(f"           encontrada em {format_seconds(campaign_elapsed)}")
-                print("\nResultado")
-                print(f"  Senha: {recovered}")
-                print("  Status: encontrada")
-                print(f"  Tempo: {format_seconds(elapsed)}")
-                print(f"  Campanha: {campaign.label}")
+                announce(f"           encontrada em {format_seconds(campaign_elapsed)}")
                 return AuditResult(
                     recovered=True,
                     elapsed_seconds=elapsed,
@@ -764,24 +765,54 @@ def run_single_audit(
 
             if execution.diagnostic or (not execution.timed_out and execution.return_code != 1):
                 diagnostic = execution.diagnostic or f"Código de saída inesperado: {execution.return_code}"
-                print(f"           ERRO após {format_seconds(campaign_elapsed)}: {diagnostic}")
-                print("\nResultado")
-                print("  Status: auditoria interrompida por erro operacional")
-                print(f"  Campanha: {campaign.label}")
+                announce(f"           ERRO após {format_seconds(campaign_elapsed)}: {diagnostic}")
                 return AuditResult(False, time.monotonic() - started, campaign.label, completed=False, error=diagnostic)
             if execution.timed_out:
-                print(f"           prazo atingido após {format_seconds(campaign_elapsed)}")
+                announce(f"           prazo atingido após {format_seconds(campaign_elapsed)}")
                 break
-            print(f"           concluída sem encontrar em {format_seconds(campaign_elapsed)}")
+            announce(f"           concluída sem encontrar em {format_seconds(campaign_elapsed)}")
         else:
             completed = True
 
-        elapsed = min(time.monotonic() - started, duration_seconds)
-        print("\nResultado")
-        print(f"  Senha: {password}")
-        print("  Status: não encontrada após todas as campanhas" if completed else "  Status: tempo esgotado; teste parcial")
-        print(f"  Tempo: {format_seconds(elapsed)}")
+        elapsed = time.monotonic() - started
+        if duration_seconds is not None:
+            elapsed = min(elapsed, duration_seconds)
         return AuditResult(recovered=False, elapsed_seconds=elapsed, completed=completed)
+
+
+def run_single_audit(
+    password: str,
+    duration_seconds: int,
+    campaigns: list[Campaign],
+    session_directory: Path,
+    attempt_number: int,
+    registration: Registration,
+    association: dict[str, str],
+) -> AuditResult:
+    """Interface interativa anterior; a senha não entra no worker remoto."""
+    password_hash = hashlib.md5(password.encode("utf-8"), usedforsecurity=False).hexdigest()
+    result = run_hash_audit(
+        password_hash,
+        duration_seconds,
+        campaigns,
+        session_directory,
+        attempt_number,
+        registration,
+        association,
+        progress=True,
+    )
+    print("\nResultado")
+    print(f"  Senha: {password}")
+    if result.recovered:
+        print("  Status: encontrada")
+    elif result.error:
+        print("  Status: auditoria interrompida por erro operacional")
+    else:
+        print("  Status: não encontrada após todas as campanhas" if result.completed else "  Status: tempo esgotado; teste parcial")
+    print(f"  Tempo: {format_seconds(result.elapsed_seconds)}")
+    if result.campaign:
+        print(f"  Campanha: {result.campaign}")
+    return result
 
 
 def main() -> int:

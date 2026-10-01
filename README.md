@@ -19,6 +19,22 @@ Se nenhum dispositivo aparecer, no Ubuntu/Debian é possível habilitar o proces
 sudo apt install pocl-opencl-icd
 ```
 
+## Worker da API (somente contas sintéticas)
+
+O modo interativo acima continua separado. O worker em `src/audit_worker.py` busca uma tarefa da API, executa as mesmas campanhas usando **apenas o MD5 recebido** e devolve status, tempo e campanha. Não envia nem persiste a senha encontrada: o potfile temporário do Hashcat pode contê-la durante a execução e é apagado ao fim da tarefa. O login da aplicação continua usando Argon2id.
+
+Primeiro, rode FastAPI/PostgreSQL localmente conforme o guia em `gt-tecseg-integration/backend/README.md` (repositório vizinho), com `LAB_AUDIT_ENABLED=true` e um `WORKER_TOKEN` aleatório de pelo menos 32 caracteres no `backend/.env`. Use um banco de laboratório que contenha **somente contas inteiramente fictícias**: o worker reivindica a tarefa pendente mais antiga, não necessariamente a última conta cadastrada. Em outro terminal, nesta pasta:
+
+```bash
+export AUDIT_API_URL=http://127.0.0.1:8000
+read -rsp 'Token do worker: ' WORKER_TOKEN; echo; export WORKER_TOKEN
+python3 src/audit_worker.py
+```
+
+Por padrão, ele processa no máximo uma tarefa (`Nenhuma tarefa pendente` se a fila estiver vazia). `--loop` busca continuamente, com intervalo padrão de 5 segundos; use somente depois de validar uma tarefa supervisionada. Cada tarefa termina ao encontrar a senha ou concluir as 51 campanhas; não há prazo automático no worker. As máscaras finais podem demorar muito mais que três minutos dependendo do equipamento. `Ctrl+C` interrompe a tarefa e a registra como erro. O worker rejeita HTTP fora de `localhost`/loopback: no servidor da UFF, use HTTPS autorizado ou um túnel SSH que entregue a API na porta loopback do servidor. **Não exponha a porta interna da API nem o token na internet.**
+
+O protocolo ainda não tem recuperação automática se o processo morrer após reivindicar uma tarefa; ela fica como `processing` e exige intervenção antes de testar novamente. Por isso, esta etapa serve para teste supervisionado, não para execução autônoma prolongada. Para conferir o worker sem GPU ou rede: `python3 -m unittest tests.test_worker -v`.
+
 ## Ordem das campanhas
 
 1. Consulta direta: Top 100 mil (até 8) e BR completo.
