@@ -1,60 +1,56 @@
-# Hashcat MVP
+# Hashcat MVP — worker de laboratório
 
-Protótipo de laboratório para simular o cadastro e auditar senhas sintéticas de até 8 caracteres usando MD5. O programa coleta dados fictícios de cadastro, gera associações locais e executa as campanhas do projeto dentro do tempo informado.
+Este pacote processa **somente contas inteiramente fictícias**. O cadastro no
+FastAPI cria uma tarefa no PostgreSQL; o worker na UFF busca a tarefa pela API,
+executa as campanhas e devolve status, tempo e campanha. O cadastro **não inicia**
+o worker por conta própria.
 
-## Como executar
+## Arquivos principais
 
-Requisitos: Linux x86_64 e um dispositivo OpenCL disponível (GPU ou CPU). Python 3.10+ é recomendado para evitar diferenças de `glibc` entre computadores.
+- `src/audit_worker.py`: consulta a fila da API e executa uma tarefa por padrão.
+- `src/campaigns.py`: implementa as 51 campanhas e as associações do cadastro.
+- `hashcat/`, `wordlists/`, `rules/`, `masks/`: recursos usados pelas campanhas.
+- `tests/`: verificações do worker e dos recursos.
+
+O login da aplicação usa Argon2id. O MD5 de laboratório fica na tarefa até o
+resultado ser recebido; a API então o apaga. O worker não envia a senha
+recuperada à API nem grava um log de senhas. Arquivos temporários, inclusive o
+potfile, são descartados ao fim da tarefa.
+
+## Executar uma tarefa
+
+Requisitos: Linux x86_64, Python 3.10+, Hashcat/OpenCL funcionais, FastAPI com
+`LAB_AUDIT_ENABLED=true`, e um `WORKER_TOKEN` próprio com pelo menos 32 caracteres.
+Na UFF, a API deve ser alcançável por HTTPS autorizado ou por túnel SSH em
+`127.0.0.1`; não exponha os endpoints internos à internet.
 
 ```bash
-chmod +x run.sh
-./run.sh
-```
-
-O pacote já inclui o recorte do RockYou com candidatos UTF-8 de até 8 caracteres, pronto para uso. `run.sh` usa Python 3.10+ quando disponível; caso contrário, tenta o executável portátil. Uma instalação separada do Hashcat não é necessária. A primeira compilação do kernel OpenCL pode levar cerca de um minuto.
-
-Se nenhum dispositivo aparecer, no Ubuntu/Debian é possível habilitar o processador com:
-
-```bash
-sudo apt install pocl-opencl-icd
-```
-
-## Worker da API (somente contas sintéticas)
-
-O modo interativo acima continua separado. O worker em `src/audit_worker.py` busca uma tarefa da API, executa as mesmas campanhas usando **apenas o MD5 recebido** e devolve status, tempo e campanha. Não envia nem persiste a senha encontrada: o potfile temporário do Hashcat pode contê-la durante a execução e é apagado ao fim da tarefa. O login da aplicação continua usando Argon2id.
-
-Primeiro, rode FastAPI/PostgreSQL localmente conforme o guia em `gt-tecseg-integration/backend/README.md` (repositório vizinho), com `LAB_AUDIT_ENABLED=true` e um `WORKER_TOKEN` aleatório de pelo menos 32 caracteres no `backend/.env`. Use um banco de laboratório que contenha **somente contas inteiramente fictícias**: o worker reivindica a tarefa pendente mais antiga, não necessariamente a última conta cadastrada. Em outro terminal, nesta pasta:
-
-```bash
-export AUDIT_API_URL=http://127.0.0.1:8000
-read -rsp 'Token do worker: ' WORKER_TOKEN; echo; export WORKER_TOKEN
+cd ~/hashcat-mvp
+export AUDIT_API_URL=http://127.0.0.1:18000
+read -r -s -p 'Token do worker: ' WORKER_TOKEN; echo
+export WORKER_TOKEN
 python3 src/audit_worker.py
 ```
 
-Por padrão, ele processa no máximo uma tarefa (`Nenhuma tarefa pendente` se a fila estiver vazia). `--loop` busca continuamente, com intervalo padrão de 5 segundos; use somente depois de validar uma tarefa supervisionada. Cada tarefa termina ao encontrar a senha ou concluir as 51 campanhas; não há prazo automático no worker. As máscaras finais podem demorar muito mais que três minutos dependendo do equipamento. `Ctrl+C` interrompe a tarefa e a registra como erro. O worker rejeita HTTP fora de `localhost`/loopback: no servidor da UFF, use HTTPS autorizado ou um túnel SSH que entregue a API na porta loopback do servidor. **Não exponha a porta interna da API nem o token na internet.**
+O comando busca a tarefa pendente **mais antiga** e sai ao concluí-la. Se não
+houver tarefa, imprime `Nenhuma tarefa pendente.`. Para buscar continuamente,
+existe `python3 src/audit_worker.py --loop`, mas ele processa **toda** a fila;
+use-o apenas sob supervisão e com uso da GPU autorizado pelo laboratório.
+Interrompa com `Ctrl+C` e, ao terminar, use `unset WORKER_TOKEN AUDIT_API_URL`.
 
-O protocolo ainda não tem recuperação automática se o processo morrer após reivindicar uma tarefa; ela fica como `processing` e exige intervenção antes de testar novamente. Por isso, esta etapa serve para teste supervisionado, não para execução autônoma prolongada. Para conferir o worker sem GPU ou rede: `python3 -m unittest tests.test_worker -v`.
+As campanhas param quando encontram a senha ou terminam todas as etapas. Não
+há limite automático de três minutos; máscaras finais podem demorar muito mais.
+Se o processo morrer depois de reivindicar uma tarefa, ela pode ficar em
+`processing` e exigir intervenção. Não deixe este protótipo operando sem
+supervisão.
 
-## Ordem das campanhas
+## Verificar
 
-1. Consulta direta: Top 100 mil (até 8) e BR completo.
-2. Máscara numérica completa de 1 a 8 dígitos.
-3. Associação direta; depois, bases curtas com anos plausíveis e símbolos na mesma rule.
-4. Associação com números e símbolos, RockYou (até 8), rules pessoais e palavras brasileiras curtas.
-5. Dicionário brasileiro com rules ajustadas ao limite de 8 caracteres.
-6. Seis híbridos adicionais: bases de até 3/4/5 caracteres com 4/3/2 dígitos e símbolo, nas duas ordens. As bases combinam termos BR curtos e variações do cadastro.
-7. Híbridos anteriores de palavra brasileira + dígitos/símbolo, máscaras estruturadas e RockYou com uma rule curta.
-8. Rules pesadas sobre bases pessoais e rules essenciais/pesadas sobre o BR ASCII.
-9. Máscaras amplas por último.
+```bash
+python3 -m unittest tests.test_worker -q
+python3 tests/smoke_test.py
+```
 
-Cada subcampanha aparece no terminal com seu nome, posição, tempo restante e tempo gasto. As duas primeiras consultas comparam MD5 localmente, sem o custo de iniciar o Hashcat; as demais executam o Hashcat. As associações só são preparadas se as consultas iniciais e a máscara numérica não encontrarem a senha. O teste para quando encontra a senha, quando termina todas as campanhas, quando vence o tempo informado ou quando ocorre um erro operacional. O resultado distingue cobertura completa, prazo esgotado e falha; as etapas finais podem não ser alcançadas em testes curtos.
-
-A rule prioritária usa o ano de nascimento e os anos de três anos atrás até o próximo ano, combinados com símbolos comuns. Essas regras são criadas no início da sessão; os seis híbridos usam máscaras de dígitos e símbolos sobre bases de até 3, 4 ou 5 caracteres. Essas sete etapas respeitam o limite do protótipo de oito caracteres.
-
-Antes de compartilhar resultados, valide o pacote no próprio computador/servidor com `python3 tests/smoke_test.py`. Ele usa apenas hashes e senhas sintéticos e confere as 51 campanhas, arquivos, máscaras, rules e os modos `0`, `1`, `3`, `6` e `7`. O primeiro teste pode levar mais tempo por causa da compilação dos kernels OpenCL.
-
-## Resultados
-
-Cada execução acrescenta o resultado em `audit_log.txt`. Esse arquivo não entra no Git. Ele contém os dados do cadastro e as senhas testadas em texto claro; use somente dados fictícios e compartilhe o log apenas com a equipe autorizada.
-
-O pacote contém o executável do simulador, seu código-fonte, o runtime do Hashcat para MD5, wordlists, rules e masks usadas pelas campanhas. As sublistas `max-4`, `max-6` e `max-7` são usadas para não ultrapassar o limite de 8 caracteres nas rules que acrescentam caracteres.
+O segundo teste executa o Hashcat com senhas sintéticas e pode demorar na
+primeira compilação dos kernels OpenCL. Os recursos de terceiros mantêm suas
+licenças em `LICENSES/`.

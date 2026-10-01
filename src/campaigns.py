@@ -1,9 +1,4 @@
-#!/usr/bin/env python3
-"""Simula um cadastro e audita várias senhas para o mesmo perfil.
-
-Uso exclusivo no laboratório do MVP. MD5 não deve ser usado para armazenar
-senhas em uma aplicação real.
-"""
+"""Campanhas de auditoria para contas inteiramente fictícias do laboratório."""
 
 from __future__ import annotations
 
@@ -13,9 +8,7 @@ import os
 import re
 import signal
 import subprocess
-import sys
 import tempfile
-import termios
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -23,22 +16,11 @@ from datetime import datetime
 from pathlib import Path
 
 
-if getattr(sys, "frozen", False):
-    # No pacote portátil, o executável e todos os dados ficam na mesma pasta.
-    MVP_ROOT = Path(sys.executable).resolve().parent
-    PROJECT_ROOT = MVP_ROOT
-    HASHCAT = MVP_ROOT / "hashcat" / "hashcat.bin"
-else:
-    # O mesmo código pode rodar na pasta de desenvolvimento ou no pacote.
-    source_directory = Path(__file__).resolve().parent
-    MVP_ROOT = source_directory if (source_directory / "wordlists").is_dir() else source_directory.parent
-    PROJECT_ROOT = MVP_ROOT.parent
-    bundled_hashcat = MVP_ROOT / "hashcat" / "hashcat.bin"
-    HASHCAT = bundled_hashcat if bundled_hashcat.exists() else PROJECT_ROOT / "hashcat" / "programa" / "hashcat.bin"
+MVP_ROOT = Path(__file__).resolve().parent.parent
+HASHCAT = MVP_ROOT / "hashcat" / "hashcat.bin"
 WORDLISTS = MVP_ROOT / "wordlists"
 RULES = MVP_ROOT / "rules"
 MASKS = MVP_ROOT / "masks"
-AUDIT_LOG = MVP_ROOT / "audit_log.txt"
 COMMON_SYMBOLS = "!@#._-"
 
 
@@ -85,39 +67,6 @@ def format_seconds(value: float) -> str:
     return "<0.1 s" if value < 0.05 else f"{value:.1f} s"
 
 
-def configure_terminal_input() -> None:
-    """Normaliza o terminal e aceita as sequências comuns de apagamento."""
-    if not sys.stdin.isatty():
-        return
-
-    try:
-        attributes = termios.tcgetattr(sys.stdin.fileno())
-        attributes[0] |= termios.ICRNL
-        attributes[1] |= termios.OPOST
-        attributes[3] |= (
-            termios.ICANON
-            | termios.ECHO
-            | termios.ECHOE
-            | termios.ECHOK
-            | termios.ISIG
-        )
-        # DEL é o código enviado pelo Backspace na maioria dos terminais atuais.
-        attributes[6][termios.VERASE] = b"\x7f"
-        termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, attributes)
-    except termios.error:
-        pass
-
-    # GNU Readline cobre tanto Backspace/DEL quanto Ctrl+H e a tecla Delete.
-    try:
-        import readline
-
-        readline.parse_and_bind(r'"\C-h": backward-delete-char')
-        readline.parse_and_bind(r'"\C-?": backward-delete-char')
-        readline.parse_and_bind(r'"\e[3~": delete-char')
-    except (ImportError, RuntimeError):
-        pass
-
-
 def normalize(value: str) -> str:
     """Remove acentos e deixa somente letras e números minúsculos."""
     decomposed = unicodedata.normalize("NFKD", value)
@@ -127,81 +76,6 @@ def normalize(value: str) -> str:
         if not unicodedata.combining(character)
     )
     return "".join(character for character in without_accents.lower() if character.isalnum())
-
-
-def prompt_nonempty(label: str, minimum: int = 1, maximum: int = 120) -> str:
-    while True:
-        value = input(label).strip()
-        if minimum <= len(value) <= maximum:
-            return value
-        print(f"Informe entre {minimum} e {maximum} caracteres.")
-
-
-def prompt_birth_date() -> datetime:
-    while True:
-        value = input("Data de nascimento (DD/MM/AAAA): ").strip()
-        try:
-            birth_date = datetime.strptime(value, "%d/%m/%Y")
-        except ValueError:
-            print("Data inválida. Use DD/MM/AAAA.")
-            continue
-
-        if birth_date.date() >= datetime.now().date():
-            print("A data precisa estar no passado.")
-            continue
-        return birth_date
-
-
-def prompt_username() -> str:
-    pattern = re.compile(r"^[A-Za-z0-9._-]{3,30}$")
-    while True:
-        value = input("Nome de usuário único: ").strip()
-        if pattern.fullmatch(value):
-            return value
-        print("Use de 3 a 30 letras, números, ponto, hífen ou sublinhado.")
-
-
-def prompt_email() -> str:
-    pattern = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-    while True:
-        value = input("E-mail único: ").strip().lower()
-        if len(value) <= 320 and pattern.fullmatch(value):
-            return value
-        print("E-mail inválido.")
-
-
-def prompt_password() -> str:
-    while True:
-        password = input("Senha para testar (máximo de 8 caracteres): ")
-        if not 1 <= len(password) <= 8:
-            print("A senha deve possuir entre 1 e 8 caracteres.")
-            continue
-        return password
-
-
-def prompt_duration_seconds() -> int:
-    """Solicita uma quantidade inteira e positiva de segundos."""
-    while True:
-        raw_value = input("Tempo da auditoria em segundos: ").strip()
-        if not raw_value.isdigit():
-            print("Digite somente um número inteiro, como 10 ou 500.")
-            continue
-
-        seconds = int(raw_value)
-        if seconds >= 1:
-            return seconds
-        print("O tempo precisa ser maior que zero.")
-
-
-def confirm_registration(registration: Registration) -> bool:
-    print("\nCadastro")
-    print(f"  Nome: {registration.full_name}")
-    print(f"  Instituição: {registration.institution}")
-    print(f"  Nascimento: {registration.birth_date.strftime('%d/%m/%Y')}")
-    print(f"  Usuário: {registration.username}")
-    print(f"  E-mail: {registration.email}")
-    answer = input("Confirmar? [s/N]: ").strip().lower()
-    return answer in {"s", "sim", "y", "yes"}
 
 
 def write_candidates(path: Path, candidates: set[str]) -> str:
@@ -651,54 +525,6 @@ def validate_environment() -> None:
         raise FileNotFoundError("Arquivos necessários não encontrados:\n- " + "\n- ".join(missing))
 
 
-def start_registration_log(registration: Registration) -> int:
-    """Abre uma nova seção no TXT e devolve seu número sequencial."""
-    previous_content = ""
-    if AUDIT_LOG.exists():
-        previous_content = AUDIT_LOG.read_text(encoding="utf-8")
-
-    identifiers = [
-        int(match)
-        for match in re.findall(r"^Dados do cadastro (\d+)$", previous_content, re.MULTILINE)
-    ]
-    registration_number = max(identifiers, default=0) + 1
-
-    separator = "\n" if previous_content and not previous_content.endswith("\n\n") else ""
-    block = (
-        f"{separator}Dados do cadastro {registration_number}\n"
-        f"Nome: {registration.full_name}\n"
-        f"Instituição: {registration.institution}\n"
-        f"Nascimento: {registration.birth_date.strftime('%d/%m/%Y')}\n"
-        f"Usuário: {registration.username}\n"
-        f"E-mail: {registration.email}\n"
-    )
-    with AUDIT_LOG.open("a", encoding="utf-8") as log_file:
-        log_file.write(block)
-    AUDIT_LOG.chmod(0o600)
-    return registration_number
-
-
-def append_attempt_log(
-    attempt_number: int,
-    password: str,
-    result: AuditResult,
-) -> None:
-    """Registra uma tentativa mantendo o formato simples solicitado."""
-    if result.recovered:
-        status = f"Quebrada em {format_seconds(result.elapsed_seconds)}"
-        if result.campaign:
-            status += f" [{result.campaign}]"
-    elif result.error:
-        status = f"Erro operacional em {format_seconds(result.elapsed_seconds)} [{result.campaign}]"
-    elif not result.completed:
-        status = f"Tempo esgotado em {format_seconds(result.elapsed_seconds)} (teste parcial)"
-    else:
-        status = f"Não quebrada após todas as campanhas em {format_seconds(result.elapsed_seconds)}"
-
-    with AUDIT_LOG.open("a", encoding="utf-8") as log_file:
-        log_file.write(f"Senha {attempt_number}: {password} - {status}\n")
-
-
 def run_hash_audit(
     password_hash: str,
     duration_seconds: int | None,
@@ -778,103 +604,3 @@ def run_hash_audit(
         if duration_seconds is not None:
             elapsed = min(elapsed, duration_seconds)
         return AuditResult(recovered=False, elapsed_seconds=elapsed, completed=completed)
-
-
-def run_single_audit(
-    password: str,
-    duration_seconds: int,
-    campaigns: list[Campaign],
-    session_directory: Path,
-    attempt_number: int,
-    registration: Registration,
-    association: dict[str, str],
-) -> AuditResult:
-    """Interface interativa anterior; a senha não entra no worker remoto."""
-    password_hash = hashlib.md5(password.encode("utf-8"), usedforsecurity=False).hexdigest()
-    result = run_hash_audit(
-        password_hash,
-        duration_seconds,
-        campaigns,
-        session_directory,
-        attempt_number,
-        registration,
-        association,
-        progress=True,
-    )
-    print("\nResultado")
-    print(f"  Senha: {password}")
-    if result.recovered:
-        print("  Status: encontrada")
-    elif result.error:
-        print("  Status: auditoria interrompida por erro operacional")
-    else:
-        print("  Status: não encontrada após todas as campanhas" if result.completed else "  Status: tempo esgotado; teste parcial")
-    print(f"  Tempo: {format_seconds(result.elapsed_seconds)}")
-    if result.campaign:
-        print(f"  Campanha: {result.campaign}")
-    return result
-
-
-def main() -> int:
-    configure_terminal_input()
-    print("Registration Audit")
-    print("Use somente dados de teste. O log registra senhas em texto claro.\n")
-
-    validate_environment()
-    registration = Registration(
-        full_name=prompt_nonempty("Nome completo: ", minimum=2),
-        institution=prompt_nonempty("Instituição (sigla): ", minimum=2, maximum=20).upper(),
-        birth_date=prompt_birth_date(),
-        username=prompt_username(),
-        email=prompt_email(),
-    )
-
-    if not confirm_registration(registration):
-        print("Sessão cancelada; nenhum teste foi executado.")
-        return 0
-
-    registration_number = start_registration_log(registration)
-    print(f"Log: {AUDIT_LOG}")
-
-    with tempfile.TemporaryDirectory(prefix="gt-tecseg-audit-") as temporary_name:
-        temporary = Path(temporary_name)
-        association = association_paths(temporary)
-        campaigns = build_campaigns(association)
-        attempt_number = 1
-
-        while True:
-            print(f"\nTeste {attempt_number}")
-            password = prompt_password()
-            duration_seconds = prompt_duration_seconds()
-            result = run_single_audit(
-                password,
-                duration_seconds,
-                campaigns,
-                temporary,
-                attempt_number,
-                registration,
-                association,
-            )
-            append_attempt_log(attempt_number, password, result)
-
-            answer = input(
-                "\nDeseja testar outra senha com o mesmo cadastro? [s/N]: "
-            ).strip().lower()
-            if answer not in {"s", "sim", "y", "yes"}:
-                break
-            attempt_number += 1
-
-    print(f"\nCadastro {registration_number} encerrado.")
-    print(f"Log: {AUDIT_LOG}")
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KeyboardInterrupt:
-        print("\nTeste cancelado pelo usuário.")
-        raise SystemExit(130)
-    except (FileNotFoundError, PermissionError) as error:
-        print(f"\nErro de configuração: {error}")
-        raise SystemExit(1)

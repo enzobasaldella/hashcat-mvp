@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit_worker import WorkerConfig, WorkerError, config_from_environment, run_once  # noqa: E402
-from registration_audit import Campaign, Registration, association_paths, run_hash_audit  # noqa: E402
+from campaigns import Campaign, Registration, association_paths, run_hash_audit  # noqa: E402
 
 
 class WorkerTests(unittest.TestCase):

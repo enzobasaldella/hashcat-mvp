@@ -1,5 +1,7 @@
-# Gerados durante os testes
+# Legado sensível: nunca versionar logs com senhas em texto
 audit_log.txt
+
+# Arquivos locais de teste
 wordlists/optional/rockyou.txt
 
 # Cache e arquivos temporários do Hashcat

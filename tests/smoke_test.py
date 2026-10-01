@@ -4,12 +4,10 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import re
 import sys
 import tempfile
 import time
-from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 
@@ -17,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from registration_audit import (  # noqa: E402
+from campaigns import (  # noqa: E402
     Campaign,
     COMMON_SYMBOLS,
     HASHCAT,
@@ -30,7 +28,7 @@ from registration_audit import (  # noqa: E402
     build_campaigns,
     execute_campaign,
     recovered_password,
-    run_single_audit,
+    run_hash_audit,
     validate_environment,
 )
 
@@ -126,15 +124,15 @@ def check_audit_flow(directory: Path) -> None:
     registration = Registration("Maria Souza", "UFF", datetime(2000, 1, 2), "marias", "maria@example.org")
     association = association_paths(directory)
     campaigns = build_campaigns(association)
-    with redirect_stdout(io.StringIO()):
-        result = run_single_audit("81827718", 120, campaigns[:3], directory, 1, registration, association)
+    digest = hashlib.md5(b"81827718", usedforsecurity=False).hexdigest()
+    result = run_hash_audit(digest, 120, campaigns[:3], directory, 1, registration, association)
     assert result.recovered and result.campaign == "Máscaras - numéricas (1 a 8)", result
     print("OK: fluxo completo encontra 81827718 antes das associações")
 
     password = f"uff{datetime.now().year}@"
     assert len(password) == 8
-    with redirect_stdout(io.StringIO()):
-        result = run_single_audit(password, 120, campaigns[:5], directory, 2, registration, association)
+    digest = hashlib.md5(password.encode(), usedforsecurity=False).hexdigest()
+    result = run_hash_audit(digest, 120, campaigns[:5], directory, 2, registration, association)
     assert result.recovered and result.campaign == "Associação + ano/símbolo - base curta + ano plausível + símbolo", result
     print(f"OK: fluxo completo encontra {password} pela rule composta")
 
