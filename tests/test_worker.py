@@ -5,6 +5,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -16,10 +17,37 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from audit_worker import WorkerConfig, WorkerError, config_from_environment, run_once  # noqa: E402
-from campaigns import Campaign, Registration, association_paths, run_hash_audit  # noqa: E402
+from campaigns import Campaign, Registration, association_paths, build_campaigns, execute_campaign, run_hash_audit  # noqa: E402
 
 
 class WorkerTests(unittest.TestCase):
+    def test_hashcat_receives_remaining_runtime(self):
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            campaign = Campaign("Teste", "máscara", 3, ("?d",))
+            with patch("campaigns.subprocess.Popen") as process:
+                process.return_value.wait.return_value = 1
+                result = execute_campaign(
+                    campaign, directory / "target.hash", directory / "result.potfile", time.monotonic() + 5.2
+                )
+            command = process.call_args.args[0]
+            self.assertEqual(command[command.index("--runtime") + 1], "6")
+            self.assertEqual(result.return_code, 1)
+
+    def test_priority_order_preserves_fast_and_personal_stages(self):
+        with tempfile.TemporaryDirectory() as directory_name:
+            labels = [campaign.label for campaign in build_campaigns(association_paths(Path(directory_name)))]
+        self.assertEqual(labels[:4], [
+            "Consulta direta - Top 100 mil (até 8)",
+            "Consulta direta - BR completo",
+            "Consulta direta - RockYou (até 8)",
+            "Associação - cadastro + datas + variações",
+        ])
+        self.assertGreater(
+            labels.index("Máscaras - numéricas (1 a 8)"),
+            labels.index("Associação + BR curto - palavra + perfil"),
+        )
+
     def test_hash_only_audit_does_not_print_password(self):
         password = "Azul123"
         digest = hashlib.md5(password.encode(), usedforsecurity=False).hexdigest()
@@ -38,6 +66,22 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(result.campaign, "Consulta direta - teste")
             self.assertNotIn(password, output.getvalue())
             self.assertEqual(list(directory.glob("*.potfile")), [])
+
+    def test_campaign_progress_callback(self):
+        digest = hashlib.md5(b"Azul123", usedforsecurity=False).hexdigest()
+        registration = Registration("Maria Souza", "UFF", datetime(2000, 1, 2), "marias", "maria@example.org")
+        with tempfile.TemporaryDirectory() as directory_name:
+            directory = Path(directory_name)
+            wordlist = directory / "candidates.txt"
+            wordlist.write_text("Azul123\n", encoding="utf-8")
+            campaign = Campaign("Consulta direta", "teste", 0, (str(wordlist),), direct_lookup=True)
+            updates = []
+            result = run_hash_audit(
+                digest, None, [campaign], directory, 1, registration, association_paths(directory),
+                on_campaign=lambda index, total, label, finished: updates.append((index, total, label, finished)),
+            )
+        self.assertTrue(result.recovered)
+        self.assertEqual(updates, [(1, 1, campaign.label, False), (1, 1, campaign.label, True)])
 
     def test_worker_reports_only_status_time_and_campaign(self):
         job = {"job_id": 7, "audit_hash": "0" * 32, "full_name": "Pessoa Sintética"}

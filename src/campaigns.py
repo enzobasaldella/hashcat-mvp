@@ -14,6 +14,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 
 MVP_ROOT = Path(__file__).resolve().parent.parent
@@ -297,6 +298,8 @@ def execute_campaign(
         "0",
         "-a",
         str(campaign.attack_mode),
+        # O Hashcat também se encerra sozinho se a API cair durante esta campanha.
+        *(["--runtime", str(max(1, math.ceil(remaining)))] if remaining is not None else []),
         str(hash_file),
         *campaign.operands,
         *campaign.extra_arguments,
@@ -374,11 +377,10 @@ def add_hybrid_pair(
 def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     campaigns: list[Campaign] = []
 
-    # Candidatos frequentes primeiro; cada acervo é identificado no terminal.
+    # Primeiro as consultas e associações de melhor custo/benefício.
     add_straight(campaigns, "Consulta direta", "Top 100 mil (até 8)", WORDLISTS / "optional/top100000-8.txt", direct_lookup=True)
     add_straight(campaigns, "Consulta direta", "BR completo", WORDLISTS / "br-full-8.txt", direct_lookup=True)
-    # A lista numérica é barata em GPU e não precisa virar um TXT gigantesco.
-    campaigns.append(Campaign("Máscaras", "numéricas (1 a 8)", 3, (str(MASKS / "01-numeric.hcmask"),)))
+    add_straight(campaigns, "Consulta direta", "RockYou (até 8)", WORDLISTS / "optional/rockyou-8.txt")
     add_straight(campaigns, "Associação", "cadastro + datas + variações", association["direct"])
     add_straight(
         campaigns,
@@ -389,7 +391,6 @@ def build_campaigns(association: dict[str, str]) -> list[Campaign]:
     )
     # Padrões do cadastro têm bom custo/benefício antes da lista grande.
     add_straight(campaigns, "Associação + padrões", "números e símbolos", association["patterns"])
-    add_straight(campaigns, "Consulta direta", "RockYou (até 8)", WORDLISTS / "optional/rockyou-8.txt")
     for filename in ("top10_2025.rule", "best66.rule", "leetspeak.rule", "ptbr.rule"):
         add_straight(
             campaigns,
@@ -417,6 +418,9 @@ def build_campaigns(association: dict[str, str]) -> list[Campaign]:
             (str(short_brazilian_words), association["combinator_bases"]),
         )
     )
+
+    # A varredura numérica pode ser longa: vem após as listas e os dados do cadastro.
+    campaigns.append(Campaign("Máscaras", "numéricas (1 a 8)", 3, (str(MASKS / "01-numeric.hcmask"),)))
 
     # As três sublistas são usadas: deixam espaço para os caracteres adicionados.
     add_straight(campaigns, "Consulta + rules - BR", "caixa e leet", WORDLISTS / "br-ascii-8.txt", RULES / "max8/01-same-length.rule")
@@ -527,7 +531,7 @@ def validate_environment() -> None:
 
 def run_hash_audit(
     password_hash: str,
-    duration_seconds: int | None,
+    duration_seconds: float | None,
     campaigns: list[Campaign],
     session_directory: Path,
     attempt_number: int,
@@ -535,11 +539,12 @@ def run_hash_audit(
     association: dict[str, str],
     *,
     progress: bool = False,
+    on_campaign: Callable[[int, int, str, bool], None] | None = None,
 ) -> AuditResult:
     """Executa as campanhas usando somente o MD5; não registra a senha recuperada."""
     if not re.fullmatch(r"[0-9a-fA-F]{32}", password_hash):
         raise ValueError("Hash MD5 inválido para o laboratório.")
-    if duration_seconds is not None and duration_seconds < 1:
+    if duration_seconds is not None and duration_seconds <= 0:
         raise ValueError("O prazo precisa ser positivo.")
     password_hash = password_hash.lower()
 
@@ -559,7 +564,7 @@ def run_hash_audit(
         potfile = attempt_directory / "result.potfile"
         hash_file.write_text(password_hash + "\n", encoding="ascii")
 
-        announce(f"\nAuditoria iniciada: {duration_seconds} s" if duration_seconds is not None else "\nAuditoria iniciada: todas as campanhas")
+        announce(f"\nAuditoria iniciada: até {math.ceil(duration_seconds)} s" if duration_seconds is not None else "\nAuditoria iniciada: todas as campanhas")
         completed = False
 
         for index, campaign in enumerate(campaigns, start=1):
@@ -568,6 +573,8 @@ def run_hash_audit(
                 break
             suffix = f" | {math.ceil(remaining)} s restantes" if remaining is not None else ""
             announce(f"  [{index:02d}/{len(campaigns):02d}] {campaign.label}{suffix}")
+            if on_campaign is not None:
+                on_campaign(index, len(campaigns), campaign.label, False)
 
             campaign_started = time.monotonic()
             if campaign.stage == "Associação" and not Path(association["direct"]).exists():
@@ -580,6 +587,8 @@ def run_hash_audit(
                 execution = execute_campaign(campaign, hash_file, potfile, deadline)
                 recovered = recovered_password(potfile, password_hash)
             campaign_elapsed = time.monotonic() - campaign_started
+            if on_campaign is not None:
+                on_campaign(index, len(campaigns), campaign.label, True)
             if recovered is not None:
                 elapsed = time.monotonic() - started
                 announce(f"           encontrada em {format_seconds(campaign_elapsed)}")

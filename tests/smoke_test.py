@@ -39,6 +39,14 @@ def check_campaign_files(directory: Path) -> None:
 
     campaigns = build_campaigns(paths)
     assert len(campaigns) == 51, len(campaigns)
+    labels = [campaign.label for campaign in campaigns]
+    assert labels[:4] == [
+        "Consulta direta - Top 100 mil (até 8)",
+        "Consulta direta - BR completo",
+        "Consulta direta - RockYou (até 8)",
+        "Associação - cadastro + datas + variações",
+    ]
+    assert labels.index("Máscaras - numéricas (1 a 8)") > labels.index("Associação + BR curto - palavra + perfil")
     modes = {campaign.attack_mode for campaign in campaigns}
     assert modes == {0, 1, 3, 6, 7}, f"Modos inesperados: {modes}"
 
@@ -124,15 +132,21 @@ def check_audit_flow(directory: Path) -> None:
     registration = Registration("Maria Souza", "UFF", datetime(2000, 1, 2), "marias", "maria@example.org")
     association = association_paths(directory)
     campaigns = build_campaigns(association)
+    by_label = {campaign.label: campaign for campaign in campaigns}
     digest = hashlib.md5(b"81827718", usedforsecurity=False).hexdigest()
-    result = run_hash_audit(digest, 120, campaigns[:3], directory, 1, registration, association)
+    result = run_hash_audit(digest, 120, [by_label["Máscaras - numéricas (1 a 8)"]], directory, 1, registration, association)
     assert result.recovered and result.campaign == "Máscaras - numéricas (1 a 8)", result
-    print("OK: fluxo completo encontra 81827718 antes das associações")
+    print("OK: fluxo completo encontra 81827718 na etapa numérica")
 
     password = f"uff{datetime.now().year}@"
     assert len(password) == 8
     digest = hashlib.md5(password.encode(), usedforsecurity=False).hexdigest()
-    result = run_hash_audit(digest, 120, campaigns[:5], directory, 2, registration, association)
+    result = run_hash_audit(
+        digest, 120,
+        [by_label["Associação - cadastro + datas + variações"],
+         by_label["Associação + ano/símbolo - base curta + ano plausível + símbolo"]],
+        directory, 2, registration, association,
+    )
     assert result.recovered and result.campaign == "Associação + ano/símbolo - base curta + ano plausível + símbolo", result
     print(f"OK: fluxo completo encontra {password} pela rule composta")
 
